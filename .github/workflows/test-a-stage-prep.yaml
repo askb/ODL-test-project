@@ -1,0 +1,126 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test A: maven-stage-prep-action"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      version-method:
+        description: "De-SNAPSHOT method: sed or versions-plugin"
+        type: choice
+        options:
+          - sed
+          - versions-plugin
+        default: sed
+      debug:
+        description: "Enable debug logging"
+        type: boolean
+        default: false
+  push:
+    branches: [master]
+    paths:
+      - "pom.xml"
+      - "**/pom.xml"
+      - ".github/workflows/test-a-stage-prep.yaml"
+
+jobs:
+  test-stage-prep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout test project
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Show SNAPSHOT version (before)
+        run: |
+          echo "=== Root POM version ==="
+          grep -m1 "<version>" pom.xml
+          echo ""
+          echo "=== All module versions ==="
+          find . -name "pom.xml" -exec grep -H "<version>.*SNAPSHOT" {} \;
+
+      - name: Run maven-stage-prep-action
+        id: prep
+        # yamllint disable-line rule:line-length
+        uses: askb/maven-stage-prep-action@main
+        with:
+          project-name: testproject
+          gerrit-branch: master
+          version-method: ${{ inputs.version-method || 'sed' }}
+
+      - name: Verify outputs exist
+        run: |
+          set -euo pipefail
+          echo "::group::Output values"
+          echo "release-version: ${{ steps.prep.outputs.release-version }}"
+          echo "patch-path: ${{ steps.prep.outputs.patch-path }}"
+          echo "bundle-path: ${{ steps.prep.outputs.bundle-path }}"
+          echo "taglist-path: ${{ steps.prep.outputs.taglist-path }}"
+          echo "::endgroup::"
+
+          # Verify version is de-SNAPSHOTted
+          RELEASE_VER="${{ steps.prep.outputs.release-version }}"
+          if [[ "$RELEASE_VER" == *"SNAPSHOT"* ]]; then
+            echo "::error::Release version still contains SNAPSHOT!"
+            exit 1
+          fi
+
+          # Verify output files exist
+          test -f "${{ steps.prep.outputs.patch-path }}" \
+            || { echo "::error::Patch file missing"; exit 1; }
+          test -f "${{ steps.prep.outputs.bundle-path }}" \
+            || { echo "::error::Bundle file missing"; exit 1; }
+          test -f "${{ steps.prep.outputs.taglist-path }}" \
+            || { echo "::error::Taglist file missing"; exit 1; }
+
+      - name: Verify no SNAPSHOT in POMs
+        run: |
+          set -euo pipefail
+          SNAPSHOT_COUNT=$(grep -r "1.0.0-SNAPSHOT" --include="pom.xml" . | wc -l)
+          if [ "$SNAPSHOT_COUNT" -gt 0 ]; then
+            echo "::error::Found $SNAPSHOT_COUNT SNAPSHOT references remaining"
+            grep -r "1.0.0-SNAPSHOT" --include="pom.xml" .
+            exit 1
+          fi
+          echo "✅ All POMs de-SNAPSHOTted successfully"
+
+      - name: Verify git state
+        run: |
+          set -euo pipefail
+          echo "=== Git log ==="
+          git --no-pager log --oneline -3
+          echo ""
+          echo "=== Git tags ==="
+          git tag -l
+          echo ""
+          echo "=== Patch content (first 30 lines) ==="
+          head -30 "${{ steps.prep.outputs.patch-path }}"
+
+      - name: Upload test artifacts
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage-prep-outputs-${{ inputs.version-method || 'sed' }}
+          path: |
+            ${{ steps.prep.outputs.patch-path }}
+            ${{ steps.prep.outputs.bundle-path }}
+            ${{ steps.prep.outputs.taglist-path }}
+          retention-days: 7
+
+      - name: "Summary"
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## ✅ Test A: maven-stage-prep-action — PASSED
+
+          | Output | Value |
+          |--------|-------|
+          | release-version | `${{ steps.prep.outputs.release-version }}` |
+          | version-method | `${{ inputs.version-method || 'sed' }}` |
+          | patch-path | `${{ steps.prep.outputs.patch-path }}` |
+          | bundle-path | `${{ steps.prep.outputs.bundle-path }}` |
+          | taglist-path | `${{ steps.prep.outputs.taglist-path }}` |
+          EOF

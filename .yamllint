@@ -1,0 +1,15 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+extends: default
+
+rules:
+  line-length:
+    max: 120
+  truthy:
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  document-start:
+    present: true

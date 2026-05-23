@@ -1,0 +1,185 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test C: Artifactory Cloud Staging"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      artifactory-url:
+        description: "Artifactory Cloud URL"
+        default: "https://linuxfoundation.jfrog.io"
+      source-repo:
+        description: "Staging repository name"
+        default: "libs-staging-local"
+      target-repo:
+        description: "Release repository name"
+        default: "libs-release-local"
+      mode:
+        description: "Test mode"
+        type: choice
+        options:
+          - full-lifecycle
+          - stage-only
+          - promote-only
+        default: full-lifecycle
+      debug:
+        description: "Enable debug logging"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Java
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Maven build + deploy to local repo
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/m2repo"
+
+          # De-SNAPSHOT for staging
+          find . -name "pom.xml" -exec sed -i \
+            "s/1.0.0-SNAPSHOT/1.0.0/g" {} +
+
+          mvn clean deploy \
+            -DaltDeploymentRepository="staging::default::file://${{ github.workspace }}/m2repo" \
+            -DskipTests -B -q
+
+          echo "Deployed $(find m2repo -type f | wc -l) files"
+
+      - name: Upload m2repo
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m2repo-artifactory
+          path: m2repo/
+          retention-days: 1
+
+  test-artifactory:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Setup JFrog CLI
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
+        env:
+          JF_URL: ${{ inputs.artifactory-url }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: Download m2repo
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: m2repo-artifactory
+          path: m2repo
+
+      - name: Verify JFrog CLI connectivity
+        run: |
+          jf rt ping
+          echo "✅ Artifactory connection verified"
+
+      # ---- STAGE: Upload + Build Info ----
+      - name: "Stage: Upload artifacts to staging repo"
+        run: |
+          set -euo pipefail
+          BUILD_NAME="testproject-test"
+          BUILD_NUMBER="${{ github.run_number }}"
+
+          echo "::group::Upload to ${{ inputs.source-repo }}"
+          jf rt upload \
+            "m2repo/(*)" \
+            "${{ inputs.source-repo }}/{1}" \
+            --build-name="$BUILD_NAME" \
+            --build-number="$BUILD_NUMBER" \
+            --flat=false
+          echo "::endgroup::"
+
+          echo "::group::Publish build info"
+          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER"
+          echo "::endgroup::"
+
+          echo "✅ Staged to ${{ inputs.source-repo }}"
+
+      - name: Verify artifacts in staging
+        run: |
+          echo "=== Artifacts in staging ==="
+          jf rt search \
+            "${{ inputs.source-repo }}/org/opendaylight/testproject/**" \
+            --limit=20
+
+      # ---- PROMOTE: Staging → Release ----
+      - name: "Promote: Move from staging to release"
+        if: inputs.mode == 'full-lifecycle' || inputs.mode == 'promote-only'
+        run: |
+          set -euo pipefail
+          BUILD_NAME="testproject-test"
+          BUILD_NUMBER="${{ github.run_number }}"
+
+          jf rt build-promote "$BUILD_NAME" "$BUILD_NUMBER" \
+            "${{ inputs.target-repo }}" \
+            --source-repo "${{ inputs.source-repo }}" \
+            --status "Released" \
+            --comment "Test promotion via GHA run ${{ github.run_id }}" \
+            --copy
+
+          echo "✅ Promoted to ${{ inputs.target-repo }}"
+
+      - name: Verify artifacts in release repo
+        if: inputs.mode == 'full-lifecycle' || inputs.mode == 'promote-only'
+        run: |
+          echo "=== Artifacts in release ==="
+          jf rt search \
+            "${{ inputs.target-repo }}/org/opendaylight/testproject/**" \
+            --limit=20
+
+      # ---- CLEANUP ----
+      - name: "Cleanup: Remove test artifacts"
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "Cleaning up test artifacts..."
+
+          jf rt delete \
+            "${{ inputs.source-repo }}/org/opendaylight/testproject/" \
+            --quiet || true
+
+          jf rt delete \
+            "${{ inputs.target-repo }}/org/opendaylight/testproject/" \
+            --quiet || true
+
+          # Discard build info
+          BUILD_NAME="testproject-test"
+          jf rt build-discard "$BUILD_NAME" --max-builds 0 || true
+
+          echo "✅ Cleanup complete"
+
+      - name: "Summary"
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Test C: Artifactory Cloud Staging
+
+          | Step | Details |
+          |------|---------|
+          | Artifactory URL | ${{ inputs.artifactory-url }} |
+          | Source repo | ${{ inputs.source-repo }} |
+          | Target repo | ${{ inputs.target-repo }} |
+          | Build name | testproject-test |
+          | Build number | ${{ github.run_number }} |
+          | Mode | ${{ inputs.mode }} |
+          EOF

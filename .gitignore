@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+m2repo/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dependency-reduced-pom.xml
+
+# Pre-commit / node
+node_modules/

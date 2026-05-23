@@ -1,0 +1,178 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test B: nexus-staging-action (Nexus 2)"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      nexus-server:
+        description: "Nexus server URL"
+        default: "https://nexus.opendaylight.org"
+      staging-profile-id:
+        description: "Staging profile ID"
+        default: "96fca0367756c"
+      mode:
+        description: "Test mode"
+        type: choice
+        options:
+          - full-lifecycle
+          - stage-only
+          - close-only
+          - drop-only
+        default: full-lifecycle
+      debug:
+        description: "Enable debug logging"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      m2repo-artifact: ${{ steps.build.outputs.artifact-id }}
+    steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Java
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Maven build + deploy to local repo
+        id: build
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/m2repo"
+
+          # De-SNAPSHOT version for staging
+          RELEASE_VER="1.0.0"
+          find . -name "pom.xml" -exec sed -i \
+            "s/1.0.0-SNAPSHOT/${RELEASE_VER}/g" {} +
+
+          # Build and deploy to local m2repo
+          mvn clean deploy \
+            -DaltDeploymentRepository="staging::default::file://${{ github.workspace }}/m2repo" \
+            -DskipTests \
+            -B -q
+
+          echo "::group::Deployed artifacts"
+          find "${{ github.workspace }}/m2repo" -type f | sort
+          echo "::endgroup::"
+
+          ARTIFACT_COUNT=$(find "${{ github.workspace }}/m2repo" -type f | wc -l)
+          echo "Deployed $ARTIFACT_COUNT files to local m2repo"
+
+      - name: Upload m2repo artifact
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m2repo
+          path: m2repo/
+          retention-days: 1
+
+  test-nexus-staging:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Download m2repo
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: m2repo
+          path: m2repo
+
+      - name: Verify m2repo contents
+        run: |
+          echo "=== m2repo contents ==="
+          find m2repo -type f | sort
+          FILE_COUNT=$(find m2repo -type f | wc -l)
+          echo "Total files: $FILE_COUNT"
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::m2repo is empty!"
+            exit 1
+          fi
+
+      # ---- STAGE ----
+      - name: "Stage: Create staging repo + upload artifacts"
+        id: stage
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: ${{ inputs.nexus-server }}
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: ${{ inputs.staging-profile-id }}
+          mode: stage
+          m2repo-path: m2repo
+          description: "GHA test - ODL-test-project 1.0.0 - run ${{ github.run_id }}"
+
+      - name: Verify stage outputs
+        run: |
+          set -euo pipefail
+          echo "Staging repo ID: ${{ steps.stage.outputs.staging-repo-id }}"
+          echo "Staging repo URL: ${{ steps.stage.outputs.staging-repo-url }}"
+
+          if [ -z "${{ steps.stage.outputs.staging-repo-id }}" ]; then
+            echo "::error::staging-repo-id output is empty!"
+            exit 1
+          fi
+          echo "✅ Stage completed successfully"
+
+      # ---- CLOSE ----
+      - name: "Close: Close staging repo (triggers Nexus rules)"
+        if: >-
+          inputs.mode == 'full-lifecycle' ||
+          inputs.mode == 'close-only'
+        id: close
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: ${{ inputs.nexus-server }}
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: ${{ inputs.staging-profile-id }}
+          mode: close
+          staging-repo-id: ${{ steps.stage.outputs.staging-repo-id }}
+
+      - name: Verify close
+        if: steps.close.outcome == 'success'
+        run: echo "✅ Staging repo closed successfully"
+
+      # ---- DROP (cleanup — always) ----
+      - name: "Drop: Delete staging repo (cleanup)"
+        if: always()
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: ${{ inputs.nexus-server }}
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: ${{ inputs.staging-profile-id }}
+          mode: drop
+          staging-repo-id: ${{ steps.stage.outputs.staging-repo-id }}
+
+      - name: "Summary"
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Test B: nexus-staging-action (Nexus 2)
+
+          | Step | Status | Details |
+          |------|--------|---------|
+          | Stage | ${{ steps.stage.outcome }} | repo=${{ steps.stage.outputs.staging-repo-id }} |
+          | Close | ${{ steps.close.outcome || 'skipped' }} | |
+          | Drop | always | cleanup |
+
+          **Nexus Server:** ${{ inputs.nexus-server }}
+          **Profile ID:** ${{ inputs.staging-profile-id }}
+          **Run ID:** ${{ github.run_id }}
+          EOF

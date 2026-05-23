@@ -1,0 +1,305 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test E: Full Pipeline (Stage → Release → Central)"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-server:
+        description: "Artifact server for staging"
+        type: choice
+        options:
+          - nexus2
+          - artifactory
+        default: nexus2
+      publish-central:
+        description: "Publish to Maven Central (requires GPG)"
+        type: boolean
+        default: false
+      dry-run:
+        description: "Dry run (no real operations)"
+        type: boolean
+        default: true
+      debug:
+        description: "Enable debug logging"
+        type: boolean
+        default: false
+
+jobs:
+  # ================================================================
+  # Job 1: Prepare — De-SNAPSHOT and build
+  # ================================================================
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      release-version: ${{ steps.prep.outputs.release-version }}
+      patch-path: ${{ steps.prep.outputs.patch-path }}
+      bundle-path: ${{ steps.prep.outputs.bundle-path }}
+    steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run maven-stage-prep-action
+        id: prep
+        # yamllint disable-line rule:line-length
+        uses: askb/maven-stage-prep-action@main
+        with:
+          project-name: testproject
+          gerrit-branch: master
+          version-method: sed
+
+      - name: Setup Java
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          gpg-private-key: ${{ secrets.GPG_SECRET_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Maven deploy to local m2repo
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ github.workspace }}/m2repo"
+
+          MVN_ARGS="-DaltDeploymentRepository=staging::default::file://${{ github.workspace }}/m2repo"
+          MVN_ARGS="$MVN_ARGS -DskipTests -B -q"
+
+          # Add GPG signing if publishing to Central
+          if [ "${{ inputs.publish-central }}" = "true" ]; then
+            MVN_ARGS="$MVN_ARGS -Pgpg-sign -Dgpg.passphrase=$GPG_PASSPHRASE"
+          fi
+
+          # shellcheck disable=SC2086
+          mvn clean deploy $MVN_ARGS
+
+          echo "Deployed $(find m2repo -type f | wc -l) files"
+
+      - name: Upload staging workspace
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-workspace
+          path: |
+            m2repo/
+            ${{ steps.prep.outputs.patch-path }}
+            ${{ steps.prep.outputs.bundle-path }}
+            ${{ steps.prep.outputs.taglist-path }}
+          retention-days: 3
+
+  # ================================================================
+  # Job 2: Stage — Upload to Nexus 2 or Artifactory
+  # ================================================================
+  stage:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      staging-repo-id: ${{ steps.nexus-stage.outputs.staging-repo-id }}
+    steps:
+      - name: Download staging workspace
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: staging-workspace
+
+      # ---- Nexus 2 path ----
+      - name: "Nexus 2: Stage artifacts"
+        if: inputs.artifact-server == 'nexus2' && inputs.dry-run == false
+        id: nexus-stage
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: https://nexus.opendaylight.org
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: "96fca0367756c"
+          mode: stage
+          m2repo-path: m2repo
+          description: >-
+            testproject ${{ needs.prepare.outputs.release-version }}
+            - run ${{ github.run_id }}
+
+      - name: "Nexus 2: Close staging repo"
+        if: >-
+          inputs.artifact-server == 'nexus2' &&
+          inputs.dry-run == false &&
+          steps.nexus-stage.outcome == 'success'
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: https://nexus.opendaylight.org
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: "96fca0367756c"
+          mode: close
+          staging-repo-id: ${{ steps.nexus-stage.outputs.staging-repo-id }}
+
+      # ---- Artifactory path ----
+      - name: Setup JFrog CLI
+        if: inputs.artifact-server == 'artifactory'
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
+        env:
+          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: "Artifactory: Stage artifacts"
+        if: inputs.artifact-server == 'artifactory' && inputs.dry-run == false
+        run: |
+          set -euo pipefail
+          BUILD_NAME="testproject"
+          BUILD_NUMBER="${{ github.run_number }}"
+
+          jf rt upload "m2repo/(*)" "libs-staging-local/{1}" \
+            --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" \
+            --flat=false
+          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER"
+
+          echo "✅ Staged to libs-staging-local"
+
+      # ---- Dry-run path ----
+      - name: "Dry-run: Show what would be staged"
+        if: inputs.dry-run == true
+        run: |
+          echo "=== DRY RUN — Would stage these artifacts ==="
+          find m2repo -type f | sort
+          echo ""
+          echo "Artifact server: ${{ inputs.artifact-server }}"
+          echo "Version: ${{ needs.prepare.outputs.release-version }}"
+
+  # ================================================================
+  # Job 3: Release — Promote + publish to Central
+  # ================================================================
+  release:
+    needs: [prepare, stage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: inputs.dry-run == false
+    steps:
+      - name: Download staging workspace
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: staging-workspace
+
+      # ---- Nexus 2 promote ----
+      - name: "Nexus 2: Promote staging repo"
+        if: inputs.artifact-server == 'nexus2'
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: https://nexus.opendaylight.org
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: "96fca0367756c"
+          mode: promote
+          staging-repo-id: ${{ needs.stage.outputs.staging-repo-id }}
+
+      # ---- Artifactory promote ----
+      - name: Setup JFrog CLI
+        if: inputs.artifact-server == 'artifactory'
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
+        env:
+          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: "Artifactory: Promote to release"
+        if: inputs.artifact-server == 'artifactory'
+        run: |
+          set -euo pipefail
+          jf rt build-promote "testproject" "${{ github.run_number }}" \
+            libs-release-local \
+            --source-repo libs-staging-local \
+            --status "Released" \
+            --comment "Release ${{ needs.prepare.outputs.release-version }}" \
+            --copy
+
+      # ---- Central Portal (optional) ----
+      - name: "Central: Create bundle and upload"
+        if: inputs.publish-central == true
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Create bundle zip
+          cd m2repo && zip -r /tmp/central-bundle.zip .
+          cd ..
+
+          # Upload
+          AUTH_TOKEN=$(printf "%s:%s" "$CENTRAL_USERNAME" "$CENTRAL_TOKEN" \
+            | base64 -w0)
+
+          UPLOAD_URL="https://central.sonatype.com/api/v1/publisher/upload"
+          RELEASE_VER="${{ needs.prepare.outputs.release-version }}"
+          UPLOAD_URL="${UPLOAD_URL}?publishingType=USER_MANAGED"
+          UPLOAD_URL="${UPLOAD_URL}&name=testproject-${RELEASE_VER}"
+          DEPLOYMENT_ID=$(curl -sf \
+            --header "Authorization: Bearer ${AUTH_TOKEN}" \
+            --form "bundle=@/tmp/central-bundle.zip" \
+            "$UPLOAD_URL")
+
+          echo "Deployment ID: $DEPLOYMENT_ID"
+
+          # Poll status (max 20 min)
+          for i in $(seq 1 40); do
+            STATUS=$(curl -sf \
+              --header "Authorization: Bearer ${AUTH_TOKEN}" \
+              "https://central.sonatype.com/api/v1/publisher/status?id=${DEPLOYMENT_ID}" \
+              | jq -r '.deploymentState')
+            echo "  Status: $STATUS ($i/40)"
+            case "$STATUS" in
+              VALIDATED|PUBLISHED) echo "✅ $STATUS"; break ;;
+              FAILED) echo "::error::Failed"; exit 1 ;;
+              *) sleep 30 ;;
+            esac
+          done
+
+  # ================================================================
+  # Job 4: Cleanup — Drop staging on failure
+  # ================================================================
+  cleanup:
+    needs: [stage, release]
+    runs-on: ubuntu-24.04
+    if: failure() && inputs.dry-run == false
+    timeout-minutes: 10
+    steps:
+      - name: "Nexus 2: Drop staging repo"
+        if: >-
+          inputs.artifact-server == 'nexus2' &&
+          needs.stage.outputs.staging-repo-id != ''
+        # yamllint disable-line rule:line-length
+        uses: askb/nexus-staging-action@main
+        with:
+          nexus-server: https://nexus.opendaylight.org
+          nexus-username: ${{ secrets.NEXUS_USERNAME }}
+          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
+          staging-profile-id: "96fca0367756c"
+          mode: drop
+          staging-repo-id: ${{ needs.stage.outputs.staging-repo-id }}
+
+      - name: "Artifactory: Cleanup test artifacts"
+        if: inputs.artifact-server == 'artifactory'
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
+        env:
+          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+
+      - name: "Artifactory: Delete staged artifacts"
+        if: inputs.artifact-server == 'artifactory'
+        run: |
+          jf rt delete "libs-staging-local/org/opendaylight/testproject/" \
+            --quiet || true
+          jf rt delete "libs-release-local/org/opendaylight/testproject/" \
+            --quiet || true
