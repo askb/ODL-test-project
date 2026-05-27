@@ -258,6 +258,10 @@ jobs:
           GIT_TAG="v${VERSION}"
           PROJECT="testproject"
 
+          # Configure git identity for tagging
+          git config user.name "OpenDaylight Release"
+          git config user.email "releng@opendaylight.org"
+
           # Check for existing tag (JJB: lightweight tag collision check)
           if git rev-parse "$GIT_TAG" >/dev/null 2>&1; then
             TAG_TYPE=$(git cat-file -t "$GIT_TAG" 2>/dev/null || echo "unknown")
