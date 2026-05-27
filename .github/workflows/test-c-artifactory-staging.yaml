@@ -76,7 +76,7 @@ jobs:
     steps:
       - name: Setup JFrog CLI
         # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
+        uses: jfrog/setup-jfrog-cli@1641575d87647fb969c0545f0b6a76873e328b7c # v5.0.0
         env:
           JF_URL: ${{ inputs.artifactory-url }}
           JF_ACCESS_TOKEN: ${{ secrets.JFROG_TOKEN }}

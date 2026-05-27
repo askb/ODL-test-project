@@ -79,11 +79,11 @@ jobs:
 
       - name: Verify no SNAPSHOT in POMs
         run: |
-          set -euo pipefail
-          SNAPSHOT_COUNT=$(grep -r "1.0.0-SNAPSHOT" --include="pom.xml" . | wc -l)
+          set -uo pipefail
+          SNAPSHOT_COUNT=$(grep -r "1.0.0-SNAPSHOT" --include="pom.xml" . | wc -l || true)
           if [ "$SNAPSHOT_COUNT" -gt 0 ]; then
             echo "::error::Found $SNAPSHOT_COUNT SNAPSHOT references remaining"
-            grep -r "1.0.0-SNAPSHOT" --include="pom.xml" .
+            grep -r "1.0.0-SNAPSHOT" --include="pom.xml" . || true
             exit 1
           fi
           echo "✅ All POMs de-SNAPSHOTted successfully"
