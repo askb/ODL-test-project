@@ -221,19 +221,19 @@ jobs:
         if: inputs.artifact-server == 'artifactory'
         run: |
           set -euo pipefail
-          VERSION="${{ needs.prepare.outputs.release-version }}"
 
-          # Use jf rt copy (works with project-scoped tokens)
+          # Use jf rt copy with wildcard (works with project-scoped tokens)
+          # Source path already includes full Maven structure
           jf rt copy \
-            "odltest-staging-local/org/opendaylight/" \
-            "odltest-releases-local/org/opendaylight/" \
+            "odltest-staging-local/(*)" \
+            "odltest-releases-local/{1}" \
             --flat=false
 
           echo "✅ Promoted to odltest-releases-local"
 
           # Cleanup staging
           jf rt delete \
-            "odltest-staging-local/org/opendaylight/" \
+            "odltest-staging-local/" \
             --quiet || true
           echo "🧹 Staging cleaned up"
 
