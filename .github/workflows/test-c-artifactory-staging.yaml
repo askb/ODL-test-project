@@ -106,7 +106,8 @@ jobs:
             "${{ inputs.source-repo }}/{1}" \
             --build-name="$BUILD_NAME" \
             --build-number="$BUILD_NUMBER" \
-            --flat=false
+            --flat=false \
+            --exclusions="*.sha1;*.md5;*.sha256;*.sha512"
           echo "::endgroup::"
 
           echo "::group::Publish build info"
