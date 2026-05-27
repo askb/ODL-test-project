@@ -8,18 +8,18 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>org.opendaylight.testproject</groupId>
+    <groupId>io.github.askb.testproject</groupId>
     <artifactId>testproject-aggregator</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
 
-    <name>ODL :: testproject</name>
-    <description>ODL test project for validating Maven stage/release GHA workflows</description>
+    <name>Test Project for Maven Central Pipeline</name>
+    <description>Test project for validating Maven stage/release GHA workflows</description>
     <url>https://github.com/askb/ODL-test-project</url>
 
     <scm>
-        <connection>scm:git:ssh://git.opendaylight.org:29418/testproject.git</connection>
-        <developerConnection>scm:git:ssh://git.opendaylight.org:29418/testproject.git</developerConnection>
+        <connection>scm:git:https://github.com/askb/ODL-test-project.git</connection>
+        <developerConnection>scm:git:ssh://github.com/askb/ODL-test-project.git</developerConnection>
         <url>https://github.com/askb/ODL-test-project</url>
         <tag>HEAD</tag>
     </scm>

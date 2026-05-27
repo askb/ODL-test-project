@@ -1,32 +1,74 @@
 ---
-# SPDX-License-Identifier: EPL-1.0
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+ci:
+  skip: [gha-workflow-linter]
+  autofix_commit_msg: |
+    Chore: pre-commit autofixes
+
+    Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
+  autoupdate_commit_msg: |
+    Chore: pre-commit autoupdate
+
+    Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
     hooks:
       - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-        args: [--allow-multiple-documents]
       - id: check-added-large-files
       - id: check-merge-conflict
+      - id: check-xml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: no-commit-to-branch
+        args:
+          - --branch=dev
+          - --branch=main
+          - --branch=rc
 
-  - repo: https://github.com/adrienverge/yamllint
-    rev: v1.37.0
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: acc9d9de6369b76d22cb4167029d2035e8730b98  # frozen: v0.19.1
+    hooks:
+      - id: gitlint
+
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530  # frozen: v1.38.0
     hooks:
       - id: yamllint
-        args: [-c, .yamllint]
+        types: [yaml]
 
-  - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.7
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: 694e2c0dfb4253d51f3c6c54b8f9fec0a16764dc  # frozen: v1.7.11.24
     hooks:
       - id: actionlint
 
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
+  - repo: https://github.com/codespell-project/codespell
+    rev: 2ccb47ff45ad361a21071a7eedda4c37e6ae8c5a  # frozen: v2.4.2
     hooks:
-      - id: prettier
-        types_or: [yaml, json, markdown]
-        exclude: pom.xml
+      - id: codespell
+
+  - repo: https://github.com/lfreleng-actions/gha-workflow-linter
+    rev: a7caf8f3a1a05688d1cee46615ff94def617e5a3  # frozen: v1.0.2
+    hooks:
+      - id: gha-workflow-linter
+        args: [lint]
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 8db279a37c552206d2df62269ff6f9d31125815a  # frozen: 0.37.0
+    hooks:
+      - id: check-github-actions
+      - id: check-github-workflows
+      - id: check-jsonschema
+        name: Check GitHub Workflows set timeout-minutes
+        args:
+          - --builtin-schema
+          - github-workflows-require-timeout
+        files: ^\.github/workflows/[^/]+$
+        types:
+          - yaml
+
