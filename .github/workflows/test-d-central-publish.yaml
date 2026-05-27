@@ -15,13 +15,6 @@ on:
           - USER_MANAGED
           - AUTOMATIC
         default: USER_MANAGED
-      source:
-        description: "Artifact source"
-        type: choice
-        options:
-          - local-build
-          - artifactory-download
-        default: local-build
       dry-run:
         description: "Dry run (skip actual upload)"
         type: boolean
@@ -32,198 +25,44 @@ on:
         default: false
 
 jobs:
-  build-and-sign:
+  publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         # yamllint disable-line rule:line-length
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup Java + GPG
+      - name: Setup Java
         # yamllint disable-line rule:line-length
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           java-version: "21"
           distribution: "temurin"
-          gpg-private-key: ${{ secrets.GPG_SECRET_KEY }}
-          gpg-passphrase: GPG_PASSPHRASE
 
-      - name: Maven build + GPG sign + deploy locally
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+      - name: Maven build + deploy locally
         run: |
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/m2repo"
 
-          # De-SNAPSHOT
+          # De-SNAPSHOT for release
           find . -name "pom.xml" -exec sed -i \
             "s/1.0.0-SNAPSHOT/1.0.0/g" {} +
 
-          # Build with GPG signing
           mvn clean deploy \
-            -Pgpg-sign \
             -DaltDeploymentRepository="staging::default::file://${{ github.workspace }}/m2repo" \
-            -Dgpg.passphrase="$GPG_PASSPHRASE" \
             -DskipTests -B -q
 
-          echo "::group::Signed artifacts"
-          find m2repo -type f | sort
-          echo "::endgroup::"
+          echo "Deployed $(find m2repo -type f | wc -l) files to local repo"
 
-          # Verify .asc files exist
-          ASC_COUNT=$(find m2repo -name "*.asc" | wc -l)
-          echo "GPG signatures: $ASC_COUNT"
-          if [ "$ASC_COUNT" -eq 0 ]; then
-            echo "::error::No .asc files found — GPG signing failed!"
-            exit 1
-          fi
-
-      - name: Upload signed m2repo
+      - name: Publish to Maven Central
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: askb/central-publish-action@master
         with:
-          name: m2repo-signed
-          path: m2repo/
-          retention-days: 1
+          m2repo-path: m2repo
+          central-username: ${{ secrets.CENTRAL_USERNAME }}
+          central-token: ${{ secrets.CENTRAL_TOKEN }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY_B64 }}
+          publishing-type: ${{ inputs.publishing-type }}
+          dry-run: ${{ inputs.dry-run }}
 
-  upload-to-central:
-    needs: build-and-sign
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Download signed m2repo
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: m2repo-signed
-          path: m2repo
-
-      - name: Verify bundle contents
-        run: |
-          set -euo pipefail
-          echo "=== Bundle contents ==="
-          find m2repo -type f | sort
-
-          # Verify required file types for Maven Central
-          echo ""
-          echo "=== Verification ==="
-          POM_COUNT=$(find m2repo -name "*.pom" | wc -l)
-          JAR_COUNT=$(find m2repo -name "*.jar" ! -name "*-sources.jar" \
-            ! -name "*-javadoc.jar" | wc -l)
-          SRC_COUNT=$(find m2repo -name "*-sources.jar" | wc -l)
-          DOC_COUNT=$(find m2repo -name "*-javadoc.jar" | wc -l)
-          ASC_COUNT=$(find m2repo -name "*.asc" | wc -l)
-
-          echo "POMs: $POM_COUNT"
-          echo "JARs: $JAR_COUNT"
-          echo "Sources: $SRC_COUNT"
-          echo "Javadocs: $DOC_COUNT"
-          echo "GPG sigs: $ASC_COUNT"
-
-          if [ "$ASC_COUNT" -eq 0 ]; then
-            echo "::error::Missing GPG signatures (.asc files)"
-            exit 1
-          fi
-
-      - name: Create Central-compatible bundle ZIP
-        run: |
-          set -euo pipefail
-          cd m2repo
-          zip -r /tmp/central-bundle.zip .
-          BUNDLE_SIZE=$(du -h /tmp/central-bundle.zip | cut -f1)
-          echo "Bundle size: $BUNDLE_SIZE"
-          echo "bundle-path=/tmp/central-bundle.zip" >> "$GITHUB_ENV"
-
-      - name: Upload to Central Portal
-        if: inputs.dry-run == false
-        env:
-          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Generate Bearer token
-          AUTH_TOKEN=$(printf "%s:%s" "$CENTRAL_USERNAME" "$CENTRAL_TOKEN" \
-            | base64 -w0)
-
-          echo "Uploading bundle to Central Portal..."
-          UPLOAD_URL="https://central.sonatype.com/api/v1/publisher/upload"
-          UPLOAD_URL="${UPLOAD_URL}?publishingType=${{ inputs.publishing-type }}"
-          UPLOAD_URL="${UPLOAD_URL}&name=testproject-1.0.0"
-          DEPLOYMENT_ID=$(curl -sf \
-            --request POST \
-            --header "Authorization: Bearer ${AUTH_TOKEN}" \
-            --form "bundle=@/tmp/central-bundle.zip" \
-            "$UPLOAD_URL")
-
-          echo "Deployment ID: $DEPLOYMENT_ID"
-          echo "deployment-id=$DEPLOYMENT_ID" >> "$GITHUB_ENV"
-
-      - name: Poll deployment status
-        if: inputs.dry-run == false
-        env:
-          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          AUTH_TOKEN=$(printf "%s:%s" "$CENTRAL_USERNAME" "$CENTRAL_TOKEN" \
-            | base64 -w0)
-
-          echo "Polling status for deployment: ${{ env.deployment-id }}"
-          for i in $(seq 1 40); do
-            STATUS=$(curl -sf \
-              --header "Authorization: Bearer ${AUTH_TOKEN}" \
-              "https://central.sonatype.com/api/v1/publisher/status?id=${{ env.deployment-id }}" \
-              | jq -r '.deploymentState')
-
-            echo "  Attempt $i/40: $STATUS"
-
-            case "$STATUS" in
-              PUBLISHED)
-                echo "✅ Published to Maven Central!"
-                exit 0
-                ;;
-              FAILED)
-                echo "::error::Publication FAILED"
-                # Get failure details
-                curl -sf \
-                  --header "Authorization: Bearer ${AUTH_TOKEN}" \
-                  "https://central.sonatype.com/api/v1/publisher/status?id=${{ env.deployment-id }}" \
-                  | jq .
-                exit 1
-                ;;
-              *)
-                sleep 30
-                ;;
-            esac
-          done
-          echo "::error::Timed out waiting for publication (20 min)"
-          exit 1
-
-      - name: "Dry-run: Show what would be uploaded"
-        if: inputs.dry-run == true
-        run: |
-          echo "=== DRY RUN — Bundle contents ==="
-          unzip -l /tmp/central-bundle.zip
-          echo ""
-          echo "Would upload to: https://central.sonatype.com/api/v1/publisher/upload"
-          echo "Publishing type: ${{ inputs.publishing-type }}"
-          echo "Bundle size: $(du -h /tmp/central-bundle.zip | cut -f1)"
-          echo ""
-          echo "⚠️  Set dry-run=false to actually upload"
-
-      - name: "Summary"
-        if: always()
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## Test D: Maven Central Portal Upload
-
-          | Setting | Value |
-          |---------|-------|
-          | Publishing type | ${{ inputs.publishing-type }} |
-          | Dry run | ${{ inputs.dry-run }} |
-          | Source | ${{ inputs.source }} |
-          | Deployment ID | ${{ env.deployment-id || 'N/A (dry-run)' }} |
-          EOF

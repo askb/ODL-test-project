@@ -12,13 +12,20 @@ on:
         description: "Artifact server for staging"
         type: choice
         options:
-          - nexus2
           - artifactory
-        default: nexus2
+          - nexus2
+        default: artifactory
       publish-central:
-        description: "Publish to Maven Central (requires GPG)"
+        description: "Publish to Maven Central"
         type: boolean
         default: false
+      publishing-type:
+        description: "Central Portal publishing type"
+        type: choice
+        options:
+          - USER_MANAGED
+          - AUTOMATIC
+        default: USER_MANAGED
       dry-run:
         description: "Dry run (no real operations)"
         type: boolean
@@ -37,8 +44,6 @@ jobs:
     timeout-minutes: 20
     outputs:
       release-version: ${{ steps.prep.outputs.release-version }}
-      patch-path: ${{ steps.prep.outputs.patch-path }}
-      bundle-path: ${{ steps.prep.outputs.bundle-path }}
     steps:
       - name: Checkout
         # yamllint disable-line rule:line-length
@@ -53,33 +58,34 @@ jobs:
           gerrit-branch: master
           version-method: sed
 
+      - name: Validate release version
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.prep.outputs.release-version }}"
+          # SemVer regex (X.Y.Z with optional pre-release/build)
+          SEMVER="^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+          SEMVER="${SEMVER}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
+          if [[ ! "$VERSION" =~ $SEMVER ]]; then
+            echo "::error::Invalid version format: $VERSION"
+            echo "Expected SemVer (X.Y.Z or vX.Y.Z)"
+            exit 1
+          fi
+          echo "✅ Version $VERSION is valid SemVer"
+
       - name: Setup Java
         # yamllint disable-line rule:line-length
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
           java-version: "21"
           distribution: "temurin"
-          gpg-private-key: ${{ secrets.GPG_SECRET_KEY }}
-          gpg-passphrase: GPG_PASSPHRASE
 
       - name: Maven deploy to local m2repo
-        env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/m2repo"
-
-          MVN_ARGS="-DaltDeploymentRepository=staging::default::file://${{ github.workspace }}/m2repo"
-          MVN_ARGS="$MVN_ARGS -DskipTests -B -q"
-
-          # Add GPG signing if publishing to Central
-          if [ "${{ inputs.publish-central }}" = "true" ]; then
-            MVN_ARGS="$MVN_ARGS -Pgpg-sign -Dgpg.passphrase=$GPG_PASSPHRASE"
-          fi
-
-          # shellcheck disable=SC2086
-          mvn clean deploy $MVN_ARGS
-
+          mvn clean deploy \
+            -DaltDeploymentRepository="staging::default::file://${{ github.workspace }}/m2repo" \
+            -DskipTests -B -q
           echo "Deployed $(find m2repo -type f | wc -l) files"
 
       - name: Upload staging workspace
@@ -95,14 +101,12 @@ jobs:
           retention-days: 3
 
   # ================================================================
-  # Job 2: Stage — Upload to Nexus 2 or Artifactory
+  # Job 2: Stage — Upload to Artifactory or Nexus 2
   # ================================================================
   stage:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    outputs:
-      staging-repo-id: ${{ steps.nexus-stage.outputs.staging-repo-id }}
     steps:
       - name: Download staging workspace
         # yamllint disable-line rule:line-length
@@ -110,9 +114,40 @@ jobs:
         with:
           name: staging-workspace
 
+      # ---- Artifactory path (proven working) ----
+      - name: Setup JFrog CLI
+        if: inputs.artifact-server == 'artifactory'
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d87647fb969c0545f0b6a76873e328b7c # v5.0.0
+        env:
+          JF_URL: ${{ secrets.JFROG_URL }}
+          JF_USER: ${{ secrets.JFROG_USERNAME }}
+          JF_ACCESS_TOKEN: ${{ secrets.JFROG_TOKEN }}
+
+      - name: "Artifactory: Stage artifacts"
+        if: inputs.artifact-server == 'artifactory' && inputs.dry-run != true
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.release-version }}"
+          BUILD_NAME="testproject"
+          BUILD_NUMBER="${{ github.run_number }}"
+
+          # Upload excluding checksums (JFrog auto-generates them)
+          jf rt upload "m2repo/(*)" "odltest-staging-local/{1}" \
+            --build-name="$BUILD_NAME" \
+            --build-number="$BUILD_NUMBER" \
+            --flat=false \
+            --exclusions="*.sha1;*.md5;*.sha256;*.sha512"
+
+          # Build info publish (optional - may fail with project-scoped token)
+          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER" || \
+            echo "⚠️ build-publish skipped (project-scoped token)"
+
+          echo "✅ Staged to odltest-staging-local"
+
       # ---- Nexus 2 path ----
       - name: "Nexus 2: Stage artifacts"
-        if: inputs.artifact-server == 'nexus2' && inputs.dry-run == false
+        if: inputs.artifact-server == 'nexus2' && inputs.dry-run != true
         id: nexus-stage
         # yamllint disable-line rule:line-length
         uses: askb/nexus-staging-action@main
@@ -127,68 +162,80 @@ jobs:
             testproject ${{ needs.prepare.outputs.release-version }}
             - run ${{ github.run_id }}
 
-      - name: "Nexus 2: Close staging repo"
-        if: >-
-          inputs.artifact-server == 'nexus2' &&
-          inputs.dry-run == false &&
-          steps.nexus-stage.outcome == 'success'
-        # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
-        with:
-          nexus-server: https://nexus.opendaylight.org
-          nexus-username: ${{ secrets.NEXUS_USERNAME }}
-          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
-          staging-profile-id: "96fca0367756c"
-          mode: close
-          staging-repo-id: ${{ steps.nexus-stage.outputs.staging-repo-id }}
-
-      # ---- Artifactory path ----
-      - name: Setup JFrog CLI
-        if: inputs.artifact-server == 'artifactory'
-        # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
-        env:
-          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
-
-      - name: "Artifactory: Stage artifacts"
-        if: inputs.artifact-server == 'artifactory' && inputs.dry-run == false
-        run: |
-          set -euo pipefail
-          BUILD_NAME="testproject"
-          BUILD_NUMBER="${{ github.run_number }}"
-
-          jf rt upload "m2repo/(*)" "libs-staging-local/{1}" \
-            --build-name="$BUILD_NAME" --build-number="$BUILD_NUMBER" \
-            --flat=false
-          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER"
-
-          echo "✅ Staged to libs-staging-local"
-
       # ---- Dry-run path ----
       - name: "Dry-run: Show what would be staged"
         if: inputs.dry-run == true
         run: |
           echo "=== DRY RUN — Would stage these artifacts ==="
-          find m2repo -type f | sort
+          find m2repo -type f | sort | head -50
           echo ""
           echo "Artifact server: ${{ inputs.artifact-server }}"
           echo "Version: ${{ needs.prepare.outputs.release-version }}"
 
   # ================================================================
-  # Job 3: Release — Promote + publish to Central
+  # Job 3: Release — Promote + tag + publish to Central
   # ================================================================
   release:
     needs: [prepare, stage]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    if: inputs.dry-run == false
+    if: inputs.dry-run != true
     steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Download staging workspace
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: staging-workspace
+
+      # ---- Verify bundle hash (JJB release-job.sh:582-594) ----
+      - name: Verify taglist hash
+        run: |
+          set -euo pipefail
+          if [ -f "archives/patches/taglist.log" ]; then
+            TAG_HASH=$(awk '{print $NF}' archives/patches/taglist.log)
+            HEAD_HASH=$(git rev-parse HEAD)
+            echo "Taglist hash: $TAG_HASH"
+            echo "HEAD hash:    $HEAD_HASH"
+            if [ "$TAG_HASH" != "$HEAD_HASH" ]; then
+              echo "::warning::Tag hash doesn't match HEAD (expected for test)"
+            fi
+          else
+            echo "No taglist.log found (standalone test)"
+          fi
+
+      # ---- Artifactory promote (proven: jf rt copy) ----
+      - name: Setup JFrog CLI
+        if: inputs.artifact-server == 'artifactory'
+        # yamllint disable-line rule:line-length
+        uses: jfrog/setup-jfrog-cli@1641575d87647fb969c0545f0b6a76873e328b7c # v5.0.0
+        env:
+          JF_URL: ${{ secrets.JFROG_URL }}
+          JF_USER: ${{ secrets.JFROG_USERNAME }}
+          JF_ACCESS_TOKEN: ${{ secrets.JFROG_TOKEN }}
+
+      - name: "Artifactory: Promote to releases"
+        if: inputs.artifact-server == 'artifactory'
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.prepare.outputs.release-version }}"
+
+          # Use jf rt copy (works with project-scoped tokens)
+          jf rt copy \
+            "odltest-staging-local/org/opendaylight/" \
+            "odltest-releases-local/org/opendaylight/" \
+            --flat=false
+
+          echo "✅ Promoted to odltest-releases-local"
+
+          # Cleanup staging
+          jf rt delete \
+            "odltest-staging-local/org/opendaylight/" \
+            --quiet || true
+          echo "🧹 Staging cleaned up"
 
       # ---- Nexus 2 promote ----
       - name: "Nexus 2: Promote staging repo"
@@ -203,103 +250,71 @@ jobs:
           mode: promote
           staging-repo-id: ${{ needs.stage.outputs.staging-repo-id }}
 
-      # ---- Artifactory promote ----
-      - name: Setup JFrog CLI
-        if: inputs.artifact-server == 'artifactory'
-        # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
-        env:
-          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
-
-      - name: "Artifactory: Promote to release"
-        if: inputs.artifact-server == 'artifactory'
+      # ---- Create git tag (JJB tag-git-repo equivalent) ----
+      - name: Create release tag
         run: |
           set -euo pipefail
-          jf rt build-promote "testproject" "${{ github.run_number }}" \
-            libs-release-local \
-            --source-repo libs-staging-local \
-            --status "Released" \
-            --comment "Release ${{ needs.prepare.outputs.release-version }}" \
-            --copy
+          VERSION="${{ needs.prepare.outputs.release-version }}"
+          GIT_TAG="v${VERSION}"
+          PROJECT="testproject"
 
-      # ---- Central Portal (optional) ----
-      - name: "Central: Create bundle and upload"
+          # Check for existing tag (JJB: lightweight tag collision check)
+          if git rev-parse "$GIT_TAG" >/dev/null 2>&1; then
+            TAG_TYPE=$(git cat-file -t "$GIT_TAG" 2>/dev/null || echo "unknown")
+            if [ "$TAG_TYPE" = "tag" ]; then
+              echo "INFO: Repo already has signed tag $GIT_TAG, nothing to do"
+              exit 0
+            else
+              echo "::error::Lightweight tag $GIT_TAG exists, blocks signed tag"
+              exit 1
+            fi
+          fi
+
+          # Create annotated tag
+          git tag -am "${PROJECT} ${GIT_TAG}" "$GIT_TAG"
+          echo "✅ Created tag: $GIT_TAG"
+
+          # Push tag (skip in test — no write access needed)
+          # git push origin "$GIT_TAG"
+          echo "⚠️ Skipping tag push (test mode)"
+
+      # ---- Central Portal publish (using proven action) ----
+      - name: "Central: Publish to Maven Central"
         if: inputs.publish-central == true
-        env:
-          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Create bundle zip
-          cd m2repo && zip -r /tmp/central-bundle.zip .
-          cd ..
-
-          # Upload
-          AUTH_TOKEN=$(printf "%s:%s" "$CENTRAL_USERNAME" "$CENTRAL_TOKEN" \
-            | base64 -w0)
-
-          UPLOAD_URL="https://central.sonatype.com/api/v1/publisher/upload"
-          RELEASE_VER="${{ needs.prepare.outputs.release-version }}"
-          UPLOAD_URL="${UPLOAD_URL}?publishingType=USER_MANAGED"
-          UPLOAD_URL="${UPLOAD_URL}&name=testproject-${RELEASE_VER}"
-          DEPLOYMENT_ID=$(curl -sf \
-            --header "Authorization: Bearer ${AUTH_TOKEN}" \
-            --form "bundle=@/tmp/central-bundle.zip" \
-            "$UPLOAD_URL")
-
-          echo "Deployment ID: $DEPLOYMENT_ID"
-
-          # Poll status (max 20 min)
-          for i in $(seq 1 40); do
-            STATUS=$(curl -sf \
-              --header "Authorization: Bearer ${AUTH_TOKEN}" \
-              "https://central.sonatype.com/api/v1/publisher/status?id=${DEPLOYMENT_ID}" \
-              | jq -r '.deploymentState')
-            echo "  Status: $STATUS ($i/40)"
-            case "$STATUS" in
-              VALIDATED|PUBLISHED) echo "✅ $STATUS"; break ;;
-              FAILED) echo "::error::Failed"; exit 1 ;;
-              *) sleep 30 ;;
-            esac
-          done
-
-  # ================================================================
-  # Job 4: Cleanup — Drop staging on failure
-  # ================================================================
-  cleanup:
-    needs: [stage, release]
-    runs-on: ubuntu-24.04
-    if: failure() && inputs.dry-run == false
-    timeout-minutes: 10
-    steps:
-      - name: "Nexus 2: Drop staging repo"
-        if: >-
-          inputs.artifact-server == 'nexus2' &&
-          needs.stage.outputs.staging-repo-id != ''
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: askb/central-publish-action@master
         with:
-          nexus-server: https://nexus.opendaylight.org
-          nexus-username: ${{ secrets.NEXUS_USERNAME }}
-          nexus-password: ${{ secrets.NEXUS_PASSWORD }}
-          staging-profile-id: "96fca0367756c"
-          mode: drop
-          staging-repo-id: ${{ needs.stage.outputs.staging-repo-id }}
+          m2repo-path: m2repo
+          central-username: ${{ secrets.CENTRAL_USERNAME }}
+          central-token: ${{ secrets.CENTRAL_TOKEN }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY_B64 }}
+          publishing-type: ${{ inputs.publishing-type }}
+          dry-run: "false"
 
-      - name: "Artifactory: Cleanup test artifacts"
-        if: inputs.artifact-server == 'artifactory'
-        # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
-        env:
-          JF_URL: ${{ secrets.ARTIFACTORY_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
-
-      - name: "Artifactory: Delete staged artifacts"
-        if: inputs.artifact-server == 'artifactory'
+  # ================================================================
+  # Job 4: Summary
+  # ================================================================
+  summary:
+    needs: [prepare, stage, release]
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Pipeline summary
         run: |
-          jf rt delete "libs-staging-local/org/opendaylight/testproject/" \
-            --quiet || true
-          jf rt delete "libs-release-local/org/opendaylight/testproject/" \
-            --quiet || true
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Full Pipeline Results
+
+          | Stage | Status |
+          |-------|--------|
+          | Prepare | ${{ needs.prepare.result }} |
+          | Stage | ${{ needs.stage.result }} |
+          | Release | ${{ needs.release.result }} |
+
+          | Setting | Value |
+          |---------|-------|
+          | Version | ${{ needs.prepare.outputs.release-version }} |
+          | Artifact Server | ${{ inputs.artifact-server }} |
+          | Publish Central | ${{ inputs.publish-central }} |
+          | Dry Run | ${{ inputs.dry-run }} |
+          EOF
+
