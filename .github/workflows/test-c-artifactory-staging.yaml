@@ -13,10 +13,10 @@ on:
         default: "https://linuxfoundation.jfrog.io"
       source-repo:
         description: "Staging repository name"
-        default: "libs-staging-local"
+        default: "odltest-staging-local"
       target-repo:
         description: "Release repository name"
-        default: "libs-release-local"
+        default: "odltest-releases-local"
       mode:
         description: "Test mode"
         type: choice
@@ -79,7 +79,7 @@ jobs:
         uses: jfrog/setup-jfrog-cli@1641575d8e90b7d7c2b0d5ae2f073f1745120205 # v5.0.0
         env:
           JF_URL: ${{ inputs.artifactory-url }}
-          JF_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          JF_ACCESS_TOKEN: ${{ secrets.JFROG_TOKEN }}
 
       - name: Download m2repo
         # yamllint disable-line rule:line-length
