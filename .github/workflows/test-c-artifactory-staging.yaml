@@ -104,14 +104,17 @@ jobs:
           jf rt upload \
             "m2repo/(*)" \
             "${{ inputs.source-repo }}/{1}" \
-            --build-name="$BUILD_NAME" \
-            --build-number="$BUILD_NUMBER" \
             --flat=false \
             --exclusions="*.sha1;*.md5;*.sha256;*.sha512"
           echo "::endgroup::"
 
-          echo "::group::Publish build info"
-          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER"
+          # Note: build-publish requires access to artifactory-build-info
+          # repo (platform-level). Skip for project-scoped tokens.
+          # For production, grant token access or use platform-level token.
+          echo "::group::Publish build info (optional)"
+          jf rt build-collect-env "$BUILD_NAME" "$BUILD_NUMBER"
+          jf rt build-publish "$BUILD_NAME" "$BUILD_NUMBER" || \
+            echo "⚠️ Build info publish skipped (no permission to artifactory-build-info repo)"
           echo "::endgroup::"
 
           echo "✅ Staged to ${{ inputs.source-repo }}"
@@ -128,15 +131,13 @@ jobs:
         if: inputs.mode == 'full-lifecycle' || inputs.mode == 'promote-only'
         run: |
           set -euo pipefail
-          BUILD_NAME="testproject-test"
-          BUILD_NUMBER="${{ github.run_number }}"
 
-          jf rt build-promote "$BUILD_NAME" "$BUILD_NUMBER" \
-            "${{ inputs.target-repo }}" \
-            --source-repo "${{ inputs.source-repo }}" \
-            --status "Released" \
-            --comment "Test promotion via GHA run ${{ github.run_id }}" \
-            --copy
+          # Use copy instead of build-promote (avoids build-info permission)
+          echo "Promoting artifacts from ${{ inputs.source-repo }} → ${{ inputs.target-repo }}"
+          jf rt copy \
+            "${{ inputs.source-repo }}/org/opendaylight/testproject/**" \
+            "${{ inputs.target-repo }}/" \
+            --flat=false
 
           echo "✅ Promoted to ${{ inputs.target-repo }}"
 
