@@ -52,9 +52,10 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/m2repo"
 
-          # De-SNAPSHOT for release
-          find . -name "pom.xml" -exec sed -i \
-            "s/1.0.0-SNAPSHOT/1.0.0/g" {} +
+          # De-SNAPSHOT for release — Maven Central rejects SNAPSHOT versions.
+          # Use the versions plugin so this is version-agnostic (strips the
+          # -SNAPSHOT suffix from the parent and every module in the reactor).
+          mvn -q versions:set -DremoveSnapshot=true -DgenerateBackupPoms=false
 
           mvn clean deploy \
             -DaltDeploymentRepository="staging::default::file://${{ github.workspace }}/m2repo" \
