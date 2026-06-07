@@ -1,0 +1,108 @@
+---
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test F: Sigul Signing Smoke Test"
+
+# Standalone smoke test for sigul signing from a GitHub-hosted runner.
+# Proves: (1) the sigul bridge is reachable from GHA, (2) the client cert +
+# NSS DB authenticate, (3) the sandbox key can sign. A green run also confirms
+# there is no source-IP allowlist blocking hosted runners. This does NOT touch
+# central-publish or the release path.
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable debug logging"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  sigul-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Prepare test artifact
+        run: |
+          set -euo pipefail
+          # Workspace-relative file. The sigul Docker action runs
+          # `cd $GITHUB_WORKSPACE` inside its container, so sign-object MUST be
+          # relative (an absolute host path would not exist in the container).
+          printf 'sigul smoke test %s\n' "${GITHUB_SHA}" > sigul-smoke-test.txt
+          echo "Created sigul-smoke-test.txt ($(wc -c < sigul-smoke-test.txt) bytes)"
+
+      - name: Sign with Sigul
+        # yamllint disable-line rule:line-length
+        uses: lfit/sigul-sign-action@39307c0b992e7c92ca4d2558409da96c0cc2bc15 # v1.0.0
+        with:
+          sign-type: "sign-data"
+          sign-object: "sigul-smoke-test.txt"
+          sigul-ip: ${{ vars.SIGUL_IP }}
+          sigul-uri: ${{ vars.SIGUL_URI }}
+          sigul-conf: ${{ secrets.SIGUL_CONF }}
+          sigul-key-name: ${{ vars.SIGUL_KEY_NAME }}
+          sigul-pass: ${{ secrets.SIGUL_PASS }}
+          sigul-pki: ${{ secrets.SIGUL_PKI }}
+
+      - name: Verify signature produced
+        id: verify
+        run: |
+          set -euo pipefail
+          ASC="sigul-smoke-test.txt.asc"
+          if [ ! -s "$ASC" ]; then
+            echo "::error::No signature file '$ASC' was produced by sigul"
+            exit 1
+          fi
+          echo "Signature file present: $ASC ($(wc -c < "$ASC") bytes)"
+
+          # Show the signature packet + signing key id (does not need the
+          # public key in the keyring). Proves sigul produced a real OpenPGP sig.
+          echo "--- gpg --list-packets ---"
+          gpg --list-packets "$ASC" || true
+
+          # Detect armor vs binary (lfit action omits `-a`, so .asc may be
+          # BINARY — Maven Central requires ASCII-armored; flag it here).
+          if head -1 "$ASC" | grep -q -- "-----BEGIN PGP SIGNATURE-----"; then
+            echo "armored=true"  >> "$GITHUB_OUTPUT"
+            echo "Signature is ASCII-armored (Central-ready)."
+          else
+            echo "armored=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signature is BINARY (lfit action lacks '-a'). \
+            Maven Central requires armored .asc — needs an '-a' fix before \
+            using this for the release path."
+          fi
+
+      - name: Upload signature artifact
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sigul-smoke-signature
+          path: |
+            sigul-smoke-test.txt
+            sigul-smoke-test.txt.asc
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Sigul Signing Smoke Test"
+            echo ""
+            echo "| Item | Value |"
+            echo "|------|-------|"
+            echo "| Bridge | \`${{ vars.SIGUL_IP }}\` (${{ vars.SIGUL_URI }}) |"
+            echo "| Key | \`${{ vars.SIGUL_KEY_NAME }}\` |"
+            echo "| Signature armored | \`${{ steps.verify.outputs.armored }}\` |"
+            echo ""
+            echo "A green run confirms bridge reachability + cert auth + key access \
+            (no IP allowlist blocking hosted runners)."
+          } >> "$GITHUB_STEP_SUMMARY"
