@@ -19,6 +19,13 @@ on:
         description: "Publish to Maven Central"
         type: boolean
         default: false
+      signing-method:
+        description: "How to sign artifacts before Central upload"
+        type: choice
+        options:
+          - sigul
+          - gpg
+        default: sigul
       publishing-type:
         description: "Central Portal publishing type"
         type: choice
@@ -282,6 +289,32 @@ jobs:
           # git push origin "$GIT_TAG"
           echo "⚠️ Skipping tag push (test mode)"
 
+      # ---- Sigul signing (decoupled from central-publish) ----
+      - name: Build sigul sign list
+        if: inputs.publish-central == true && inputs.signing-method == 'sigul'
+        run: |
+          set -euo pipefail
+          {
+            echo "SIGN_LIST<<SIGEOF"
+            find m2repo -type f \
+              \( -name '*.jar' -o -name '*.pom' -o -name '*.module' \)
+            echo "SIGEOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign m2repo with Sigul
+        if: inputs.publish-central == true && inputs.signing-method == 'sigul'
+        # yamllint disable-line rule:line-length
+        uses: askb/sigul-sign-action@8306f9ef0470a7f52f5b1c354ad1822ea0a731b3 # CentOS7-EOL + armor fix
+        with:
+          sign-type: "sign-data"
+          sign-object: ${{ env.SIGN_LIST }}
+          sigul-ip: ${{ vars.SIGUL_IP }}
+          sigul-uri: ${{ vars.SIGUL_URI }}
+          sigul-conf: ${{ secrets.SIGUL_CONF }}
+          sigul-key-name: ${{ vars.SIGUL_KEY_NAME }}
+          sigul-pass: ${{ secrets.SIGUL_PASS }}
+          sigul-pki: ${{ secrets.SIGUL_PKI }}
+
       # ---- Central Portal publish (using proven action) ----
       - name: "Central: Publish to Maven Central"
         if: inputs.publish-central == true
@@ -291,6 +324,7 @@ jobs:
           m2repo-path: m2repo
           central-username: ${{ secrets.CENTRAL_USERNAME }}
           central-token: ${{ secrets.CENTRAL_TOKEN }}
+          signing-method: ${{ inputs.signing-method }}
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY_B64 }}
           publishing-type: ${{ inputs.publishing-type }}
           dry-run: "false"
