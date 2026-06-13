@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
-      release-version: ${{ steps.prep.outputs.release-version }}
+      release-version: ${{ steps.prep.outputs.release_version }}
     steps:
       - name: Checkout
         # yamllint disable-line rule:line-length
@@ -72,7 +72,7 @@ jobs:
       - name: Validate release version
         run: |
           set -euo pipefail
-          VERSION="${{ steps.prep.outputs.release-version }}"
+          VERSION="${{ steps.prep.outputs.release_version }}"
           # SemVer regex (X.Y.Z with optional pre-release/build)
           SEMVER="^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
           SEMVER="${SEMVER}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"
@@ -106,9 +106,9 @@ jobs:
           name: staging-workspace
           path: |
             m2repo/
-            ${{ steps.prep.outputs.patch-path }}
-            ${{ steps.prep.outputs.bundle-path }}
-            ${{ steps.prep.outputs.taglist-path }}
+            ${{ steps.prep.outputs.patch_path }}
+            ${{ steps.prep.outputs.bundle_path }}
+            ${{ steps.prep.outputs.taglist_path }}
           retention-days: 3
 
   # ================================================================
@@ -118,6 +118,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      staging-repo-id: ${{ steps.nexus-stage.outputs.staging_repo_id }}
     steps:
       - name: Download staging workspace
         # yamllint disable-line rule:line-length
