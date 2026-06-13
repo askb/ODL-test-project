@@ -105,7 +105,7 @@ jobs:
       - name: "Stage: Create staging repo + upload artifacts"
         id: stage
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: lfreleng-actions/nexus-staging-action@main
         with:
           nexus-server: ${{ inputs.nexus-server }}
           nexus-username: ${{ secrets.NEXUS_USERNAME }}
@@ -134,7 +134,7 @@ jobs:
           inputs.mode == 'close-only'
         id: close
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: lfreleng-actions/nexus-staging-action@main
         with:
           nexus-server: ${{ inputs.nexus-server }}
           nexus-username: ${{ secrets.NEXUS_USERNAME }}
@@ -151,7 +151,7 @@ jobs:
       - name: "Drop: Delete staging repo (cleanup)"
         if: always()
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: lfreleng-actions/nexus-staging-action@main
         with:
           nexus-server: ${{ inputs.nexus-server }}
           nexus-username: ${{ secrets.NEXUS_USERNAME }}

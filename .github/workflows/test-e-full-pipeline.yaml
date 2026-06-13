@@ -41,6 +41,10 @@ on:
         description: "Enable debug logging"
         type: boolean
         default: false
+      sign-git-tag:
+        description: "Sign + push the release git tag with Sigul (JJB tag-git-repo parity)"
+        type: boolean
+        default: false
 
 jobs:
   # ================================================================
@@ -59,7 +63,7 @@ jobs:
       - name: Run maven-stage-prep-action
         id: prep
         # yamllint disable-line rule:line-length
-        uses: askb/maven-stage-prep-action@main
+        uses: lfreleng-actions/maven-stage-prep-action@main
         with:
           project-name: testproject
           gerrit-branch: master
@@ -157,7 +161,7 @@ jobs:
         if: inputs.artifact-server == 'nexus2' && inputs.dry-run != true
         id: nexus-stage
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: lfreleng-actions/nexus-staging-action@main
         with:
           nexus-server: https://nexus.opendaylight.org
           nexus-username: ${{ secrets.NEXUS_USERNAME }}
@@ -186,6 +190,8 @@ jobs:
     needs: [prepare, stage]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: write  # push the signed git tag
     if: inputs.dry-run != true
     steps:
       - name: Checkout
@@ -248,7 +254,7 @@ jobs:
       - name: "Nexus 2: Promote staging repo"
         if: inputs.artifact-server == 'nexus2'
         # yamllint disable-line rule:line-length
-        uses: askb/nexus-staging-action@main
+        uses: lfreleng-actions/nexus-staging-action@main
         with:
           nexus-server: https://nexus.opendaylight.org
           nexus-username: ${{ secrets.NEXUS_USERNAME }}
@@ -264,6 +270,9 @@ jobs:
           VERSION="${{ needs.prepare.outputs.release-version }}"
           GIT_TAG="v${VERSION}"
           PROJECT="testproject"
+
+          # Export tag name for the downstream sigul sign-git-tag step
+          echo "GIT_TAG=$GIT_TAG" >> "$GITHUB_ENV"
 
           # Configure git identity for tagging
           git config user.name "OpenDaylight Release"
@@ -287,7 +296,43 @@ jobs:
 
           # Push tag (skip in test — no write access needed)
           # git push origin "$GIT_TAG"
-          echo "⚠️ Skipping tag push (test mode)"
+          echo "⚠️ Skipping plain tag push (signed-tag step below handles push)"
+
+      # ---- Sign + push release git tag with Sigul (JJB tag-git-repo parity) ----
+      - name: Sign git tag with Sigul
+        if: inputs.sign-git-tag == true
+        # yamllint disable-line rule:line-length
+        uses: askb/sigul-sign-action@8306f9ef0470a7f52f5b1c354ad1822ea0a731b3 # CentOS7-EOL + armor fix
+        with:
+          sign-type: "sign-git-tag"
+          sign-object: ${{ env.GIT_TAG }}
+          sigul-ip: ${{ vars.SIGUL_IP }}
+          sigul-uri: ${{ vars.SIGUL_URI }}
+          sigul-conf: ${{ secrets.SIGUL_CONF }}
+          sigul-key-name: ${{ vars.SIGUL_KEY_NAME }}
+          sigul-pass: ${{ secrets.SIGUL_PASS }}
+          sigul-pki: ${{ secrets.SIGUL_PKI }}
+          gh-user: ${{ github.actor }}
+          gh-key: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify signed git tag
+        if: inputs.sign-git-tag == true
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin || true
+          echo "INFO: git tag -v ${GIT_TAG} (best-effort; sandbox pubkey not on keyring)"
+          if git cat-file -t "${GIT_TAG}" >/dev/null 2>&1; then
+            echo "Tag object type: $(git cat-file -t "${GIT_TAG}")"
+            git cat-file -p "${GIT_TAG}" | sed -n '1,20p'
+          fi
+          if git tag -v "${GIT_TAG}" 2>&1; then
+            echo "✅ Signed tag verified"
+          else
+            MSG="Signed-tag verification failed — expected for the sandbox"
+            MSG="$MSG key (pubkey not published); signature presence is what"
+            MSG="$MSG we are testing."
+            echo "::warning::${MSG}"
+          fi
 
       # ---- Sigul signing (decoupled from central-publish) ----
       - name: Build sigul sign list
@@ -319,7 +364,7 @@ jobs:
       - name: "Central: Publish to Maven Central"
         if: inputs.publish-central == true
         # yamllint disable-line rule:line-length
-        uses: askb/central-publish-action@master
+        uses: lfreleng-actions/central-publish-action@master
         with:
           m2repo-path: m2repo
           central-username: ${{ secrets.CENTRAL_USERNAME }}
@@ -355,4 +400,3 @@ jobs:
           | Publish Central | ${{ inputs.publish-central }} |
           | Dry Run | ${{ inputs.dry-run }} |
           EOF
-

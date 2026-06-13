@@ -92,7 +92,7 @@ jobs:
 
       - name: Publish to Maven Central
         # yamllint disable-line rule:line-length
-        uses: askb/central-publish-action@master
+        uses: lfreleng-actions/central-publish-action@master
         with:
           m2repo-path: m2repo
           central-username: ${{ secrets.CENTRAL_USERNAME }}

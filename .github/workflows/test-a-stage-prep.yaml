@@ -46,7 +46,7 @@ jobs:
       - name: Run maven-stage-prep-action
         id: prep
         # yamllint disable-line rule:line-length
-        uses: askb/maven-stage-prep-action@main
+        uses: lfreleng-actions/maven-stage-prep-action@main
         with:
           project-name: testproject
           gerrit-branch: master
