@@ -42,7 +42,7 @@ jobs:
 
       - name: Sign with Sigul
         # yamllint disable-line rule:line-length
-        uses: askb/sigul-sign-action@8306f9ef0470a7f52f5b1c354ad1822ea0a731b3 # CentOS7-EOL + armor fix
+        uses: askb/sigul-sign-action@e86504e7cdf588a58974160344f66f1e8d20515f # Option B: FROM lfreleng/sigul image + armor
         with:
           sign-type: "sign-data"
           sign-object: "sigul-smoke-test.txt"
