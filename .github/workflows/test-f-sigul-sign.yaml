@@ -42,7 +42,7 @@ jobs:
 
       - name: Sign with Sigul
         # yamllint disable-line rule:line-length
-        uses: lfit/sigul-sign-action@6921b6b0e6cc572967729a7ce562553c641d8d19 # PR#6 merge (image-based + armor)
+        uses: lfit/sigul-sign-action@6921b6b0e6cc572967729a7ce562553c641d8d19 # v1.1.0
         with:
           sign-type: "sign-data"
           sign-object: "sigul-smoke-test.txt"
