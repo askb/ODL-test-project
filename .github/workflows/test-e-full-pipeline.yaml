@@ -131,7 +131,7 @@ jobs:
       - name: Setup JFrog CLI
         if: inputs.artifact-server == 'artifactory'
         # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d87647fb969c0545f0b6a76873e328b7c # v5.0.0
+        uses: jfrog/setup-jfrog-cli@deda456d982fc5e9a7a020b63eb0d2968aedd33e # v5.1.0
         env:
           JF_URL: ${{ secrets.JFROG_URL }}
           JF_USER: ${{ secrets.JFROG_USERNAME }}
@@ -226,7 +226,7 @@ jobs:
       - name: Setup JFrog CLI
         if: inputs.artifact-server == 'artifactory'
         # yamllint disable-line rule:line-length
-        uses: jfrog/setup-jfrog-cli@1641575d87647fb969c0545f0b6a76873e328b7c # v5.0.0
+        uses: jfrog/setup-jfrog-cli@deda456d982fc5e9a7a020b63eb0d2968aedd33e # v5.1.0
         env:
           JF_URL: ${{ secrets.JFROG_URL }}
           JF_USER: ${{ secrets.JFROG_USERNAME }}
