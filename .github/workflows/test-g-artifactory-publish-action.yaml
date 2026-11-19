@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: EPL-1.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+name: "Test G: artifactory-publish-action"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      artifactory-url:
+        description: "Artifactory URL"
+        default: "https://linuxfoundation.jfrog.io"
+      repository:
+        description: "Target repository key"
+        default: "odltest-staging-local"
+      keep:
+        description: "Keep uploaded artifacts (skip cleanup)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: "0.1.0-test.${{ github.run_id }}"
+      REPO_KEY: ${{ inputs.repository }}
+    steps:
+      - name: Checkout
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: "21"
+          distribution: "temurin"
+
+      - name: Maven build + deploy to local repo
+        run: |
+          set -euo pipefail
+          # Unique release version per run, as a tag-driven release sets
+          find . -name "pom.xml" -exec sed -i \
+            "s/0.1.0-SNAPSHOT/${VERSION}/g" {} +
+          mvn clean deploy \
+            -DaltDeploymentRepository="local::default::file://${GITHUB_WORKSPACE}/m2repo" \
+            -DskipTests -B -q
+          echo "Deployed $(find m2repo -type f | wc -l) files"
+
+      - name: Dry run
+        id: dry
+        # yamllint disable-line rule:line-length
+        uses: askb/artifactory-publish-action@e3903f73adcfa2a6f4ebe32f61fb2b3f6256cea5 # main (prototype)
+        with:
+          artifactory_url: ${{ inputs.artifactory-url }}
+          repository: ${{ inputs.repository }}
+          files_path: m2repo
+          dry_run: "true"
+
+      - name: Publish
+        id: publish
+        # yamllint disable-line rule:line-length
+        uses: askb/artifactory-publish-action@e3903f73adcfa2a6f4ebe32f61fb2b3f6256cea5 # main (prototype)
+        with:
+          artifactory_url: ${{ inputs.artifactory-url }}
+          access_token: ${{ secrets.JFROG_TOKEN }}
+          repository: ${{ inputs.repository }}
+          files_path: m2repo
+
+      - name: Verify
+        env:
+          DRY: ${{ steps.dry.outputs.dry_run_count }}
+          COUNT: ${{ steps.publish.outputs.publication_count }}
+        run: |
+          set -euo pipefail
+          found=$(jf rt search --count "${REPO_KEY}/io/github/askb/testproject/*/${VERSION}/*")
+          echo "dry_run_count=${DRY} publication_count=${COUNT} found=${found}"
+          [ "$DRY" = "$COUNT" ] && [ "$found" = "$COUNT" ] && [ "$COUNT" -gt 0 ]
+
+      - name: Cleanup
+        if: always() && !inputs.keep && steps.publish.outcome != 'skipped'
+        run: |
+          jf rt delete --quiet "${REPO_KEY}/io/github/askb/testproject/*/${VERSION}/" || true
