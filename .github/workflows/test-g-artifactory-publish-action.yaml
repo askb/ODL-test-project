@@ -79,9 +79,13 @@ jobs:
           COUNT: ${{ steps.publish.outputs.publication_count }}
         run: |
           set -euo pipefail
+          # maven-metadata.xml sits above the version dirs; count only
+          # the versioned files, minus checksums the action excludes
+          want=$(find m2repo -path "*/${VERSION}/*" -type f \
+            ! -name '*.md5' ! -name '*.sha*' | wc -l)
           found=$(jf rt search --count "${REPO_KEY}/io/github/askb/testproject/*/${VERSION}/*")
-          echo "dry_run_count=${DRY} publication_count=${COUNT} found=${found}"
-          [ "$DRY" = "$COUNT" ] && [ "$found" = "$COUNT" ] && [ "$COUNT" -gt 0 ]
+          echo "dry_run_count=${DRY} publication_count=${COUNT} want=${want} found=${found}"
+          [ "$DRY" = "$COUNT" ] && [ "$found" = "$want" ] && [ "$want" -gt 0 ]
 
       - name: Cleanup
         if: always() && !inputs.keep && steps.publish.outcome != 'skipped'
